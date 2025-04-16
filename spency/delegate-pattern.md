@@ -180,31 +180,82 @@ Domains become easier to test in isolation:
 
 ## Practical Examples
 
-### Example 1: User Role Changes Affecting Product Access
+### Example 1: User Role Changes and Product Relationships
 
-When a user's role changes, product access might need to be updated:
+There are two approaches to handling how user role changes affect products:
+
+#### Approach A: Authorization-Based (Preferred for Simple Cases)
+
+In most systems, user access to products would be handled through authorization checks at request time:
+
+```go
+// In productapp.go
+func (a *app) viewProduct(ctx context.Context, r *http.Request) web.Encoder {
+    user, err := mid.GetUser(ctx)
+    if err != nil {
+        return errs.New(errs.Unauthorized, err)
+    }
+    
+    productID, err := uuid.Parse(web.Param(r, "product_id"))
+    if err != nil {
+        return errs.New(errs.InvalidArgument, err)
+    }
+    
+    product, err := a.productBus.QueryByID(ctx, productID)
+    if err != nil {
+        // Handle error...
+    }
+    
+    // Authorization check happens at request time
+    if !a.authorizer.CanAccessProduct(user.Roles, product) {
+        return errs.New(errs.Forbidden, errors.New("insufficient permissions"))
+    }
+    
+    return toAppProduct(product)
+}
+```
+
+This approach is:
+- Simpler (no cascading updates)
+- More consistent (single point of truth)
+- Typically more performant (no batch operations)
+
+#### Approach B: Delegate Pattern (For Complex Scenarios)
+
+The delegate pattern might be used in more complex scenarios where authorization alone isn't sufficient:
 
 ```go
 // In productbus.go
-func (b *Business) HandleUserUpdate(ctx context.Context, userID uuid.UUID, uu userbus.UpdateUser) error {
-    // If roles were updated
-    if uu.Roles != nil {
-        // Check if the user still has access to their assigned products
-        products, err := b.storer.QueryByOwner(ctx, userID)
-        if err != nil {
-            return fmt.Errorf("querying products: %w", err)
+func (b *Business) HandleUserRoleChange(ctx context.Context, userID uuid.UUID, oldRoles, newRoles []string) error {
+    // This would be used when:
+    // 1. The system maintains complex product-role relationships in a separate table
+    // 2. There are business rules that go beyond simple authorization checks
+    // 3. Role changes trigger specific business logic related to products
+    
+    // For example, when a user is promoted to admin:
+    if containsRole(newRoles, "ADMIN") && !containsRole(oldRoles, "ADMIN") {
+        // Grant them ownership of certain products
+        if err := b.assignAdminProducts(ctx, userID); err != nil {
+            return fmt.Errorf("assigning admin products: %w", err)
         }
-        
-        // Update product access based on new roles
-        for _, product := range products {
-            if err := b.updateProductAccess(ctx, product, uu.Roles); err != nil {
-                return fmt.Errorf("updating product access: %w", err)
-            }
+    }
+    
+    // Or when a user loses a specialized role:
+    if containsRole(oldRoles, "PRODUCT_MANAGER") && !containsRole(newRoles, "PRODUCT_MANAGER") {
+        // Reassign their managed products to another manager
+        if err := b.reassignManagedProducts(ctx, userID); err != nil {
+            return fmt.Errorf("reassigning managed products: %w", err)
         }
     }
     
     return nil
 }
+```
+
+This approach makes sense when:
+1. Role changes trigger business logic beyond simple access control
+2. The system needs to maintain complex relationships between users and products
+3. There are actions that must happen immediately when roles change, not at next access
 ```
 
 ### Example 2: User Deletion Cascading to Products
@@ -250,6 +301,24 @@ While powerful, the Delegate pattern isn't appropriate for all scenarios:
 3. **When Order of Execution is Critical**: When handlers must execute in a specific order with guarantees
 
 4. **For High-Performance Operations**: The pattern adds some overhead and indirection
+
+5. **For Simple Authorization Checks**: Simple permission checks based on user roles are better handled through authorization middleware at request time rather than through delegates
+
+## Delegate Pattern vs. Authorization
+
+It's important to distinguish between scenarios that call for the delegate pattern versus those better handled by authorization:
+
+### Use Authorization When:
+- Checking if a user has permission to access a resource
+- Enforcing role-based access control
+- Validating permissions at request time
+- Implementing consistent access control policies
+
+### Use the Delegate Pattern When:
+- Different domains need to react to events
+- Complex business processes span multiple domains
+- Changes in one domain trigger workflows in other domains
+- Cross-cutting concerns need to be separated from core domain logic
 
 ## Implementation Guidelines
 
